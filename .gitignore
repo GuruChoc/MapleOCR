@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+
+# MapleOCR local data / generated output
+screenshots/
+screenshots_before_*/
+Output/
+Output_*/
+_old_versions_*/
+mapleexport.txt
+mapleupload.txt
+maplelocked.txt
+lock_status.txt
+*.zip
+
+# OCR/debug/generated reports
+actual_screenshots_folder_listing.txt
+equipped_screenshots_listing.txt
+arena_colosseum_equipment_list*.txt
+basic_equipped_preset_list.txt
+bad_screenshots.txt
+auto_sets*.txt
+delete_from_opti.txt
+fresh_inventory_sanity*.txt
+import_review_easyocr*.csv
+import_review_easyocr*.txt
+inventory_log.txt
+managed_pve_equipment_list*.txt
+mapleexcel*.txt
+names*.txt
+name_fix_report*.txt
+no_stat_scaling_report*.txt
+parsed_rows_debug*.txt
+RUN_ID.txt
+run_summary*.txt
+screenshot_manifest*.txt
+stat_review.txt
+
+# Windows / editors
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
