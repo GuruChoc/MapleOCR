@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-MapleOCR v180 - equipped Basic Preset, no stat scaling, lock snapshot.
+MapleOCR v187 - white-first OCR with duplicate whole-number reconstruction.
 
 Uses mapleexport.txt only for optimiser non-equipment settings and preset names.
 Old optimiser equipment inventory/items are not trusted. comparisonItems and
@@ -8,7 +8,7 @@ comparisonItemsBySlot are replaced with fresh OCR items only. Arena, Colosseum,
 HP, MP and Chapter Boss are rebuilt from OCR items. Breakthrough and other equipment presets are kept by name
 but cleared for manual optimiser rebuild.
 
-v180 change: keeps v180 preset logic and also writes maplelocked.txt / lock_status.txt from the exact same screenshot batch. maplelocked.txt lists only items whose screenshot showed a closed red padlock; lock_status.txt lists every trusted item as locked/unlocked/unclear.
+v187 change: keeps the v181/v182 fixes and adds foreground colour-aware value selection for substats. Bright white and green/yellow-green numeric tokens inside the popup value area are preferred; dark grey/red background/comparison bleed is rejected before candidate selection. Fixed-row parsing and zero-rounding remain.
 
 Core rules:
 - Treat MapleStory Idle RPG equipment screenshots as fixed UI cards, not free-form text.
@@ -20,7 +20,7 @@ Core rules:
 - If a required main value cannot be trusted, item is excluded from mapleupload.txt and sent to review.
 
 Primary workflow:
-  python maple_batch_importer_easyocr_v180.py C:\MapleOCR\screenshots C:\MapleOCR\mapleexport.txt --dry-run --full-inventory
+  python maple_batch_importer_easyocr_v187.py C:\MapleOCR\screenshots C:\MapleOCR\mapleexport.txt --dry-run --full-inventory
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ except Exception:  # setup_venv.ps1 / requirements.txt installs these
     cv2 = None
     np = None
 
-VERSION = "v180"
+VERSION = "v187"
 
 SLOT_ORDER = [
     "hat", "top", "bottom", "gloves", "ring", "ring2", "eye", "earring",
@@ -78,6 +78,7 @@ SUBSTAT_LABELS = {
     "main-stat": "main-stat",
     "main-stat-percent": "main-stat-percent",
     "defense": "defense",
+    "defense-penetration": "defense-penetration",
     "crit-rate": "crit-rate",
     "crit-damage": "crit-damage",
     "skill-level-1": "skill-level-1",
@@ -101,7 +102,7 @@ SUBSTAT_LABELS = {
 
 # Output labels in review/debug text
 LABEL_TEXT = {
-    "attack": "Attack", "max-hp": "Max HP", "max-mp": "Max MP", "defense": "Defense",
+    "attack": "Attack", "max-hp": "Max HP", "max-mp": "Max MP", "defense": "Defense", "defense-penetration": "Defense Penetration",
     "accuracy": "Accuracy", "evasion": "Evasion", "main-stat": "Main Stat",
     "main-stat-percent": "Main Stat %", "crit-rate": "Critical Rate", "crit-damage": "Critical Damage",
     "skill-level-1": "1st Job Skill Lv.", "skill-level-2": "2nd Job Skill Lv.",
@@ -149,6 +150,8 @@ class OCRToken:
     cx: float
     cy: float
     h: float
+    fg_ratio: float = 0.0
+    fg_class: str = "unknown"
 
 @dataclass
 class OCRRow:
@@ -237,6 +240,7 @@ def canonical_label(text: str) -> Optional[str]:
     if "max mp" in t or t.startswith("maxmp") or "maxmp" in t: return "max-mp"
     if "evasion" in t: return "evasion"
     if "accuracy" in t: return "accuracy"
+    if "defense penetration" in t or ("defense" in t and "penetration" in t): return "defense-penetration"
     if "defense" in t: return "defense"
     # Plain attack/damage only if the row is mostly the label; avoid item titles.
     # v159 accepts merged Attack+item-name OCR when the stat row starts with Attack.
@@ -269,7 +273,7 @@ def plausible_value(label: str, value: float) -> bool:
     if label in ("defense", "main-stat"): return 1 <= value <= 1000000
     if label in ("accuracy", "evasion"): return 0 <= value <= 200 and abs(value - round(value)) < 0.01
     if label.startswith("skill-level"): return 0 <= value <= 30 and abs(value - round(value)) < 0.01
-    if label in ("crit-rate", "crit-damage", "attack-speed", "normal-damage", "boss-damage", "damage", "final-damage", "min-damage-ratio", "max-damage-ratio", "main-stat-percent", "basic-attack-damage"):
+    if label in ("crit-rate", "crit-damage", "attack-speed", "normal-damage", "boss-damage", "damage", "final-damage", "min-damage-ratio", "max-damage-ratio", "main-stat-percent", "basic-attack-damage", "defense-penetration"):
         return 0 <= value <= 500
     if label == "defense": return 0 <= value <= 1000000
     return True
@@ -354,7 +358,7 @@ def _numbers_from_parts(parts: List[str], label: str) -> List[float]:
                 except Exception:
                     pass
 
-            # v180: EasyOCR can split a thousands-formatted value across
+            # v187: EasyOCR can split a thousands-formatted value across
             # two fragments as e.g. ``Attack | 20, | ,826``.  The previous
             # joiner handled ``20, | 826`` but not the second fragment keeping
             # the leading comma.  Join these only for non-percent integer main
@@ -370,7 +374,7 @@ def _numbers_from_parts(parts: List[str], label: str) -> List[float]:
                 except Exception:
                     pass
 
-            # v180: More split-number tolerance for equipped/bag popups.
+            # v187: More split-number tolerance for equipped/bag popups.
             # EasyOCR sometimes keeps the comparison delta in the right fragment
             # or inserts a letter where a comma/space should be, e.g.:
             #   Max HP | 103, | 725 -13,023  -> 103725
@@ -390,7 +394,7 @@ def _numbers_from_parts(parts: List[str], label: str) -> List[float]:
                 except Exception:
                     pass
 
-            # v180: when a comparison delta follows immediately after the
+            # v187: when a comparison delta follows immediately after the
             # right-side thousands fragment, norm_text+space stripping can
             # collapse e.g. ``040 ~2,430`` into ``0402,430``. In that case
             # the first three digits are still the right side of the main
@@ -418,6 +422,43 @@ def _value_from_side(label: str, parts: List[str]) -> Optional[float]:
     return _best_value_for_label(label, vals)
 
 
+def _foreground_whole_substat_value(label: str, parts: List[str]) -> Optional[float]:
+    """v187: choose the foreground whole-number substat value.
+
+    Ring-filter screenshots can leave readable background numbers behind the
+    popup, e.g. ``Evasion | 78 | 30 30``.  v180 used max(), so the background
+    78 incorrectly beat the real foreground 30.
+
+    Maple's popup normally draws the current substat twice on the right
+    (white current value + green highlighted value).  For Accuracy/Evasion/job
+    skill rows:
+      1. Prefer a duplicated plausible whole number.
+      2. Otherwise prefer the right-most plausible whole number.
+    This avoids promoting earlier background bleed simply because it is larger.
+    """
+    vals: List[int] = []
+    for part in parts:
+        if _part_has_percent(part):
+            continue
+        for v in _part_numbers_for_label(part, label):
+            if abs(v - round(v)) < 0.01:
+                vals.append(int(round(v)))
+    if not vals:
+        return None
+
+    counts: Dict[int, int] = {}
+    for v in vals:
+        counts[v] = counts.get(v, 0) + 1
+
+    duplicated = {v for v, n in counts.items() if n >= 2}
+    if duplicated:
+        for v in reversed(vals):
+            if v in duplicated:
+                return float(v)
+
+    return float(vals[-1])
+
+
 def _choose_from_same_row_by_side(label: str, row: OCRRow, *, substat: bool = False) -> Optional[float]:
     parts = _row_parts(row)
     if not parts:
@@ -434,7 +475,7 @@ def _choose_from_same_row_by_side(label: str, row: OCRRow, *, substat: bool = Fa
             # - Whole-number stats reject percent-bearing sides.
             # - Max MP can be a percent-style potion-helper stat, so v163
             #   allows percent-bearing sides and keeps the numeric value.
-            percent_stats = {"crit-rate", "crit-damage", "attack-speed", "normal-damage", "boss-damage", "damage", "final-damage", "min-damage-ratio", "max-damage-ratio", "main-stat-percent", "basic-attack-damage"}
+            percent_stats = {"crit-rate", "crit-damage", "attack-speed", "normal-damage", "boss-damage", "damage", "final-damage", "min-damage-ratio", "max-damage-ratio", "main-stat-percent", "basic-attack-damage", "defense-penetration"}
             sides = [("before", before), ("after", after)]
             if label in percent_stats:
                 sides = sorted(sides, key=lambda x: not any(_part_has_percent(p) for p in x[1]))
@@ -446,7 +487,10 @@ def _choose_from_same_row_by_side(label: str, row: OCRRow, *, substat: bool = Fa
             elif label in ("accuracy", "evasion") or label.startswith("skill-level"):
                 sides = [x for x in sides if not any(_part_has_percent(p) for p in x[1])]
             for _, side in sides:
-                val = _value_from_side(label, side)
+                if label in ("accuracy", "evasion") or label.startswith("skill-level"):
+                    val = _foreground_whole_substat_value(label, side)
+                else:
+                    val = _value_from_side(label, side)
                 if val is not None:
                     return val
             return None
@@ -472,6 +516,10 @@ def choose_value(label: str, row: OCRRow, nearby_rows: List[OCRRow], allow_nearb
     Main rows may use nearby value-only rows. Substats must use same-row values,
     but can accept either label|value or value|label|comparison when type-safe.
     """
+    if substat:
+        fg_val = _foreground_value_from_row(label, row)
+        if fg_val is not None:
+            return fg_val
     val = _choose_from_same_row_by_side(label, row, substat=substat)
     if val is not None:
         return val
@@ -486,16 +534,249 @@ def choose_value(label: str, row: OCRRow, nearby_rows: List[OCRRow], allow_nearb
 
 
 def clean_value(label: str, v: float) -> Any:
-    if label in ("attack", "max-hp", "defense", "main-stat", "accuracy", "evasion") or label.startswith("skill-level"):
-        return int(round(v))
-    # one decimal where needed; strip .0 by returning int for whole
-    rv = round(float(v), 1)
-    if abs(rv - round(rv)) < 0.0001:
-        return int(round(rv))
-    return rv
+    """v187 zero-rounding parser policy.
+
+    Never round OCR values up or down.
+    - Whole-number-only stats must already be whole numbers or parsing fails.
+    - Decimal/percentage stats are preserved exactly as the trusted OCR numeric
+      value produced by extract_numbers().
+    """
+    whole_only = {
+        "attack", "max-hp", "defense", "main-stat",
+        "accuracy", "evasion",
+    }
+    if label.startswith("skill-level"):
+        whole_only.add(label)
+
+    fv = float(v)
+
+    if label in whole_only:
+        if not fv.is_integer():
+            raise ValueError(f"Non-integer OCR value {v} for whole-number stat {label}; refusing to round")
+        return int(fv)
+
+    # Preserve decimal values as read. If numerically whole, keeping int is fine
+    # because it does not alter the value.
+    if fv.is_integer():
+        return int(fv)
+    return fv
 
 
-def tokens_from_easyocr(results: List[Any]) -> List[OCRToken]:
+def _foreground_mask_bgr(img: Any) -> Any:
+    """v187 foreground mask for popup stat text/value colours.
+
+    Keep only:
+    - bright white/light grey foreground text
+    - green/yellow-green highlighted/current values
+
+    Reject dark grey background text and red comparison deltas.
+    """
+    if cv2 is None or np is None or img is None:
+        return None
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+    # Bright neutral foreground (white/light grey).
+    sat = hsv[:, :, 1]
+    val = hsv[:, :, 2]
+    white = ((val >= 165) & (sat <= 105)).astype("uint8") * 255
+
+    # Maple positive/highlight green to yellow-green.
+    hue = hsv[:, :, 0]
+    green = (((hue >= 28) & (hue <= 100)) & (sat >= 45) & (val >= 90)).astype("uint8") * 255
+
+    mask = cv2.bitwise_or(white, green)
+    return mask
+
+
+def _classify_token_foreground(img: Any, tok: OCRToken) -> Tuple[float, str]:
+    """Return foreground-pixel ratio and coarse colour class for an OCR token box."""
+    if cv2 is None or np is None or img is None:
+        return 0.0, "unknown"
+    h, w = img.shape[:2]
+    x1 = max(0, min(w - 1, int(tok.x1)))
+    x2 = max(x1 + 1, min(w, int(tok.x2)))
+    y1 = max(0, min(h - 1, int(tok.y1)))
+    y2 = max(y1 + 1, min(h, int(tok.y2)))
+    crop = img[y1:y2, x1:x2]
+    if crop.size == 0:
+        return 0.0, "unknown"
+
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    hue = hsv[:, :, 0]
+    sat = hsv[:, :, 1]
+    val = hsv[:, :, 2]
+
+    white = ((val >= 165) & (sat <= 105))
+    green = (((hue >= 28) & (hue <= 100)) & (sat >= 45) & (val >= 90))
+    fg = white | green
+
+    ratio = float(fg.sum()) / float(fg.size) if fg.size else 0.0
+    white_count = int(white.sum())
+    green_count = int(green.sum())
+    if green_count > white_count and green_count > 0:
+        cls = "green"
+    elif white_count > 0:
+        cls = "white"
+    else:
+        cls = "background"
+    return ratio, cls
+
+
+def _token_numeric_candidates(row: OCRRow, label: str) -> List[Tuple[float, OCRToken]]:
+    """Extract plausible numbers from OCR tokens with token geometry/colour attached."""
+    out: List[Tuple[float, OCRToken]] = []
+    for tok in row.tokens:
+        for v in _part_numbers_for_label(tok.text, label):
+            if plausible_value(label, v):
+                out.append((v, tok))
+    return out
+
+
+def _foreground_value_from_row(label: str, row: OCRRow) -> Optional[float]:
+    """v187 trusted foreground substat selector.
+
+    Colour rule:
+    - WHITE = item's actual stat and normally always wins.
+    - GREEN = equipped-comparison value; fallback/evidence only.
+    - RED / dark grey = never trusted.
+
+    v187 whole-number reconstruction:
+    EasyOCR can split a comma-formatted WHITE number such as 1,289 into a
+    tiny WHITE fragment ("1") while also reading the complete 1,289 in the
+    adjacent comparison text. When the same complete whole number appears
+    at least twice on the row, that duplicate is strong evidence of the
+    intended value and is preferred over a tiny WHITE fragment.
+
+    This does NOT make GREEN authoritative. It only uses exact duplicate
+    whole-number evidence to reconstruct a fragmented WHITE value.
+
+    Other rules:
+    - Percentage stats: left-most WHITE wins.
+    - Accuracy/Evasion: duplicated foreground value preferred, otherwise WHITE.
+    - Skill-level rows retain the proven v183 duplicate/right-most logic.
+    - Never round.
+    """
+    if not row.tokens:
+        return None
+
+    label_tokens = [t for t in row.tokens if canonical_label(t.text) == label]
+    label_right = max((t.x2 for t in label_tokens), default=row.x1)
+
+    if label.startswith("skill-level"):
+        parts = _row_parts(row)
+        return _foreground_whole_substat_value(label, parts)
+
+    white_cands: List[Tuple[float, OCRToken]] = []
+    green_cands: List[Tuple[float, OCRToken]] = []
+
+    for v, tok in _token_numeric_candidates(row, label):
+        if canonical_label(tok.text) == label:
+            continue
+        if tok.cx < label_right - 8:
+            continue
+        if tok.fg_ratio < 0.08:
+            continue
+        if label in ("accuracy", "evasion") and not float(v).is_integer():
+            continue
+
+        if tok.fg_class == "white":
+            white_cands.append((v, tok))
+        elif tok.fg_class == "green":
+            green_cands.append((v, tok))
+
+    large_whole = {"attack", "max-hp", "max-mp", "defense", "main-stat"}
+
+    def duplicated_whole_from_row() -> Optional[float]:
+        """Find a repeated complete whole number anywhere in foreground/raw row parts.
+
+        Used only for large whole-number rows. A repeated 1,289 / 1,289 beats
+        a lone fragment 1. This specifically handles the verified Maple UI
+        pattern where item and equipped-comparison values are identical.
+        """
+        vals: List[float] = []
+
+        # Foreground candidates first.
+        for v, _tok in white_cands + green_cands:
+            if float(v).is_integer() and plausible_value(label, v):
+                vals.append(float(v))
+
+        # Raw row parts preserve comma-formatted complete values even when colour
+        # classification split the white token badly.
+        for part in _row_parts(row):
+            if canonical_label(part):
+                continue
+            if _part_has_percent(part):
+                continue
+            for v in _part_numbers_for_label(part, label):
+                if float(v).is_integer() and plausible_value(label, v):
+                    vals.append(float(v))
+
+        counts: Dict[float, int] = {}
+        for v in vals:
+            counts[v] = counts.get(v, 0) + 1
+
+        duplicated = [v for v, n in counts.items() if n >= 2]
+        if not duplicated:
+            return None
+
+        # Prefer the largest duplicated complete value; tiny OCR fragments lose.
+        return max(duplicated)
+
+    def choose_accuracy_evasion(cands: List[Tuple[float, OCRToken]]) -> Optional[float]:
+        if not cands:
+            return None
+        counts: Dict[float, int] = {}
+        for v, _ in cands:
+            counts[v] = counts.get(v, 0) + 1
+        duplicates = {v for v, n in counts.items() if n >= 2}
+        if duplicates:
+            dup = [(v, tok) for v, tok in cands if v in duplicates]
+            dup.sort(key=lambda x: (x[1].cx, -x[1].fg_ratio))
+            return dup[0][0]
+        cands.sort(key=lambda x: (x[1].cx, -x[1].fg_ratio))
+        return cands[0][0]
+
+    # Large whole-number rows get duplicate reconstruction before ordinary
+    # WHITE-first selection. This is the verified 1 / 1,289 / 1,289 fix.
+    if label in large_whole:
+        dup = duplicated_whole_from_row()
+        if dup is not None:
+            return dup
+
+        if white_cands:
+            whole_white = [(v, t) for v, t in white_cands if float(v).is_integer()]
+            if whole_white:
+                # Complete/larger white number beats a leading fragment.
+                return max(v for v, _ in whole_white)
+
+        if green_cands:
+            whole_green = [(v, t) for v, t in green_cands if float(v).is_integer()]
+            if whole_green:
+                return max(v for v, _ in whole_green)
+        return None
+
+    # Accuracy/Evasion: WHITE first, duplicate support where present.
+    if label in ("accuracy", "evasion"):
+        if white_cands:
+            return choose_accuracy_evasion(white_cands)
+        if green_cands:
+            return choose_accuracy_evasion(green_cands)
+        return None
+
+    # Percentage/decimal stats: WHITE is authoritative and left-most item value wins.
+    if white_cands:
+        white_cands.sort(key=lambda x: (x[1].cx, -x[1].fg_ratio))
+        return white_cands[0][0]
+
+    # GREEN only if there is no usable WHITE token at all.
+    if green_cands:
+        green_cands.sort(key=lambda x: (x[1].cx, -x[1].fg_ratio))
+        return green_cands[0][0]
+
+    return None
+
+
+def tokens_from_easyocr(results: List[Any], image: Any = None) -> List[OCRToken]:
     toks: List[OCRToken] = []
     for res in results:
         if len(res) < 2:
@@ -505,7 +786,10 @@ def tokens_from_easyocr(results: List[Any]) -> List[OCRToken]:
         xs = [float(p[0]) for p in box]
         ys = [float(p[1]) for p in box]
         x1, x2, y1, y2 = min(xs), max(xs), min(ys), max(ys)
-        toks.append(OCRToken(text=text, conf=conf, x1=x1, y1=y1, x2=x2, y2=y2, cx=(x1+x2)/2, cy=(y1+y2)/2, h=(y2-y1)))
+        tok = OCRToken(text=text, conf=conf, x1=x1, y1=y1, x2=x2, y2=y2, cx=(x1+x2)/2, cy=(y1+y2)/2, h=(y2-y1))
+        if image is not None:
+            tok.fg_ratio, tok.fg_class = _classify_token_foreground(image, tok)
+        toks.append(tok)
     return toks
 
 
@@ -837,40 +1121,49 @@ def nearby_value_rows(rows: List[OCRRow], label_idx: int, next_label_idx: Option
 
 
 def detect_lock_status(image_path: Path) -> Tuple[str, str]:
-    """Detect closed red padlock state from the screenshot itself.
+    """Detect the popup's large lock button using a fixed UI ROI.
 
-    v180 conservative rule:
-    - Red padlock visible in the item icon / lock-button area = locked.
-    - If there are essentially no red padlock pixels in the left/top popup area = unlocked.
-    - Borderline / unreadable image = unclear.
+    v187 fixes false lock reads caused by red UI/background objects behind the
+    equipment popup.  The old detector scanned almost half the screenshot.
+    The game UI is fixed, so only the large lock button below the item icon is
+    inspected.
 
-    We intentionally ignore the right side of the card so red comparison deltas
-    do not get mistaken for lock icons.
+    Reference 531x834 screenshot ROI is approximately:
+      x=106..175, y=308..383
+
+    The proportional form below keeps the same location if capture dimensions
+    change slightly.
     """
     if cv2 is None or np is None:
         return "unclear", "cv2 unavailable"
     img = cv2.imread(str(image_path))
     if img is None:
         return "unclear", "image unreadable"
+
     h, w = img.shape[:2]
-    # Lock icons/buttons live in the left side of item popups and item cards.
-    # Red comparison deltas are on the right and are excluded.
-    y1 = int(h * 0.10)
-    y2 = int(h * 0.58)
-    x1 = 0
-    x2 = int(w * 0.48)
+
+    # Fixed large lock-button region.  This deliberately excludes:
+    # - the small padlock overlay on the equipment icon
+    # - red CP comparison text on the right
+    # - red/background UI elsewhere behind the popup
+    x1 = int(w * 0.20)
+    x2 = int(w * 0.33)
+    y1 = int(h * 0.37)
+    y2 = int(h * 0.46)
     crop = img[y1:y2, x1:x2]
     if crop.size == 0:
-        return "unclear", "empty lock crop"
+        return "unclear", "empty fixed lock-button crop"
+
     hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-    # Bright/saturated red and red-pink tones used by the closed padlock icon.
     hue = hsv[:, :, 0]
     sat = hsv[:, :, 1]
     val = hsv[:, :, 2]
+
+    # Bright/saturated red used by the closed lock button.
     mask = (((hue <= 12) | (hue >= 168)) & (sat >= 70) & (val >= 80)).astype("uint8") * 255
-    # Remove isolated specks, then measure connected red blobs.
     kernel = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
     count = int((mask > 0).sum())
     num_labels, labels, stats, _cent = cv2.connectedComponentsWithStats(mask, 8)
     comps = []
@@ -880,16 +1173,16 @@ def detect_lock_status(image_path: Path) -> Tuple[str, str]:
         y = int(stats[i, cv2.CC_STAT_TOP])
         ww = int(stats[i, cv2.CC_STAT_WIDTH])
         hh = int(stats[i, cv2.CC_STAT_HEIGHT])
-        # Padlock body/shackle produces medium blobs; red dots/noise are tiny.
-        if area >= 45 and ww >= 5 and hh >= 5:
+        if area >= 30 and ww >= 4 and hh >= 4:
             comps.append((area, x + x1, y + y1, ww, hh))
     comps.sort(reverse=True)
-    if comps or count >= 180:
-        return "locked", f"red_lock_pixels={count}; components={comps[:3]}"
-    if count <= 35:
-        return "unlocked", f"red_lock_pixels={count}; no red padlock component"
-    return "unclear", f"red_lock_pixels={count}; borderline/no component"
 
+    roi_text = f"roi=({x1},{y1})-({x2},{y2})"
+    if comps or count >= 80:
+        return "locked", f"{roi_text}; red_lock_pixels={count}; components={comps[:3]}"
+    if count <= 15:
+        return "unlocked", f"{roi_text}; red_lock_pixels={count}; no red lock-button component"
+    return "unclear", f"{roi_text}; red_lock_pixels={count}; borderline fixed lock-button result"
 
 def detect_visual_on_equip_anchor(image_path: Path) -> Tuple[Optional[Dict[str, Any]], List[str]]:
     """Detect the On-Equip Effect green text band visually.
@@ -987,6 +1280,206 @@ def first_row_after_visual_anchor(rows: List[OCRRow], visual_anchor: Dict[str, A
         if r.y >= min_y:
             return r.idx
     return None
+
+
+# ---------------------------------------------------------------------------
+# v187 conservative sanity checks
+# ---------------------------------------------------------------------------
+
+SANITY_PERCENT_TYPES = {
+    "crit-rate", "crit-damage", "attack-speed", "normal-damage", "boss-damage",
+    "damage", "final-damage", "min-damage-ratio", "max-damage-ratio",
+    "main-stat-percent", "basic-attack-damage", "defense-penetration",
+}
+
+SANITY_WHOLE_TYPES = {
+    "attack", "max-hp", "defense", "main-stat", "accuracy", "evasion",
+}
+
+SANITY_KNOWN_STAT_TYPES = set(SUBSTAT_LABELS.values())
+
+
+# Conservative OCR validation ranges.
+# Format: label -> {hard_min, hard_max, warn_min, warn_max}
+# HARD = send to review if outside this range.
+# WARN = keep item, but flag it as suspicious if outside this narrower range.
+#
+# These are intentionally generous. They exist to catch obvious OCR corruption
+# such as "Defense 1" from "1,580", "Critical Damage 7815", etc.
+STAT_VALIDATION_RANGES: Dict[str, Dict[str, float]] = {
+    # Whole-number option stats
+    "attack": {"hard_min": 100.0, "hard_max": 50000.0, "warn_min": 1000.0, "warn_max": 15000.0},
+    "main-stat": {"hard_min": 100.0, "hard_max": 10000.0, "warn_min": 500.0, "warn_max": 5000.0},
+    "defense": {"hard_min": 100.0, "hard_max": 10000.0, "warn_min": 500.0, "warn_max": 3000.0},
+    "accuracy": {"hard_min": 1.0, "hard_max": 100.0, "warn_min": 5.0, "warn_max": 60.0},
+    "evasion": {"hard_min": 1.0, "hard_max": 100.0, "warn_min": 5.0, "warn_max": 60.0},
+    "max-hp": {"hard_min": 1000.0, "hard_max": 5000000.0, "warn_min": 10000.0, "warn_max": 200000.0},
+    "max-mp": {"hard_min": 1.0, "hard_max": 100.0, "warn_min": 10.0, "warn_max": 60.0},
+
+    # Percentage-style option stats
+    "crit-rate": {"hard_min": 0.1, "hard_max": 100.0, "warn_min": 1.0, "warn_max": 30.0},
+    "crit-damage": {"hard_min": 0.1, "hard_max": 100.0, "warn_min": 1.0, "warn_max": 30.0},
+    "attack-speed": {"hard_min": 0.1, "hard_max": 100.0, "warn_min": 1.0, "warn_max": 30.0},
+    "normal-damage": {"hard_min": 0.1, "hard_max": 100.0, "warn_min": 1.0, "warn_max": 40.0},
+    "boss-damage": {"hard_min": 0.1, "hard_max": 100.0, "warn_min": 1.0, "warn_max": 40.0},
+    "damage": {"hard_min": 0.1, "hard_max": 100.0, "warn_min": 1.0, "warn_max": 80.0},
+    "final-damage": {"hard_min": 0.1, "hard_max": 100.0, "warn_min": 1.0, "warn_max": 80.0},
+    "min-damage-ratio": {"hard_min": 0.1, "hard_max": 100.0, "warn_min": 1.0, "warn_max": 40.0},
+    "max-damage-ratio": {"hard_min": 0.1, "hard_max": 100.0, "warn_min": 1.0, "warn_max": 40.0},
+    "main-stat-percent": {"hard_min": 0.1, "hard_max": 100.0, "warn_min": 1.0, "warn_max": 50.0},
+    "basic-attack-damage": {"hard_min": 0.1, "hard_max": 100.0, "warn_min": 1.0, "warn_max": 50.0},
+    "defense-penetration": {"hard_min": 0.1, "hard_max": 100.0, "warn_min": 1.0, "warn_max": 50.0},
+}
+
+SKILL_LEVEL_RANGE = {"hard_min": 1.0, "hard_max": 50.0, "warn_min": 1.0, "warn_max": 30.0}
+ITEM_ATTACK_RANGE = {"hard_min": 1000.0, "hard_max": 100000.0, "warn_min": 5000.0, "warn_max": 40000.0}
+
+
+def _stat_validation_range(label: str) -> Dict[str, float]:
+    if label.startswith("skill-level"):
+        return SKILL_LEVEL_RANGE
+    return STAT_VALIDATION_RANGES.get(label, {})
+
+
+
+def _numeric_equal_no_rounding(a: Any, b: Any) -> bool:
+    try:
+        return float(a) == float(b)
+    except Exception:
+        return False
+
+
+def _row_has_white_support(rows: List[OCRRow], label: str, value: Any) -> bool:
+    """True when the chosen value appears in a bright WHITE token on the matching row."""
+    for row in rows:
+        row_labels = {canonical_label(t.text) for t in row.tokens}
+        if label not in row_labels and canonical_label(row.text) != label:
+            continue
+
+        label_right = max(
+            (t.x2 for t in row.tokens if canonical_label(t.text) == label),
+            default=row.x1,
+        )
+        for tok in row.tokens:
+            if tok.cx < label_right - 8:
+                continue
+            if tok.fg_class != "white" or tok.fg_ratio < 0.08:
+                continue
+            for n in _part_numbers_for_label(tok.text, label):
+                if _numeric_equal_no_rounding(n, value):
+                    return True
+    return False
+
+
+def sanity_check_parsed_item(p: ParsedItem, rows: List[OCRRow], lock_status: str) -> Tuple[List[str], List[str]]:
+    """Return (hard_errors, soft_warnings).
+
+    HARD errors are structural/data-integrity failures only.
+    SOFT warnings are suspicious but may be valid on another account/tier. Stat ranges use generous warning bands and wider hard-reject bands.
+    No sanity rule ever changes or rounds a value.
+    """
+    hard: List[str] = []
+    warn: List[str] = []
+
+    # --- HARD: structural/data integrity only ---
+    try:
+        attack = p.item.get("attack")
+        if not isinstance(attack, int) or isinstance(attack, bool) or attack <= 0:
+            hard.append(f"attack is not a positive whole number: {attack!r}")
+        if int(p.attack) != int(attack):
+            hard.append(f"parsed attack/item attack mismatch: {p.attack!r} vs {attack!r}")
+
+        item_attack = float(attack)
+        if item_attack < ITEM_ATTACK_RANGE["hard_min"] or item_attack > ITEM_ATTACK_RANGE["hard_max"]:
+            hard.append(
+                f"item attack {attack} outside hard range "
+                f"{int(ITEM_ATTACK_RANGE['hard_min'])}-{int(ITEM_ATTACK_RANGE['hard_max'])}"
+            )
+        elif item_attack < ITEM_ATTACK_RANGE["warn_min"] or item_attack > ITEM_ATTACK_RANGE["warn_max"]:
+            warn.append(
+                f"item attack {attack} outside warning range "
+                f"{int(ITEM_ATTACK_RANGE['warn_min'])}-{int(ITEM_ATTACK_RANGE['warn_max'])}"
+            )
+    except Exception:
+        hard.append("attack internal consistency check failed")
+
+    stats = list(p.item.get("stats", []) or [])
+
+    # Maple equipment shown by this importer supports at most four option/substat rows.
+    # More than four almost certainly means row/background bleed.
+    if len(stats) > 4:
+        hard.append(f"more than 4 option stats parsed ({len(stats)})")
+
+    for st in stats:
+        typ = str(st.get("type", ""))
+        val = st.get("value")
+
+        if typ not in SANITY_KNOWN_STAT_TYPES:
+            hard.append(f"unknown stat type: {typ!r}")
+            continue
+
+        try:
+            fv = float(val)
+        except Exception:
+            hard.append(f"{typ} is not numeric: {val!r}")
+            continue
+
+        if not math.isfinite(fv):
+            hard.append(f"{typ} is non-finite: {val!r}")
+            continue
+        if fv < 0:
+            hard.append(f"{typ} is negative: {val!r}")
+
+        if typ in SANITY_WHOLE_TYPES or typ.startswith("skill-level"):
+            if not fv.is_integer():
+                hard.append(f"{typ} is fractional ({val!r}); refusing to round")
+
+        # Conservative stat min/max validation.
+        rng = _stat_validation_range(typ)
+        if rng:
+            if fv < rng["hard_min"] or fv > rng["hard_max"]:
+                hard.append(
+                    f"{typ} {val}: outside hard range "
+                    f"{rng['hard_min']}-{rng['hard_max']}"
+                )
+            elif fv < rng["warn_min"] or fv > rng["warn_max"]:
+                warn.append(
+                    f"{typ} {val}: outside warning range "
+                    f"{rng['warn_min']}-{rng['warn_max']}"
+                )
+
+        # A trusted chosen substat should ideally have a matching bright WHITE token.
+        # For this v187 sanity build, absence is a WARNING only so we can measure it
+        # against the full inventory before deciding whether to make it a hard rule.
+        if not _row_has_white_support(rows, typ, val):
+            warn.append(f"{typ} {val}: no exact WHITE foreground token support")
+
+        # --- SOFT: deliberately generous bounds ---
+        if typ in SANITY_PERCENT_TYPES and fv > 100:
+            warn.append(f"{typ} {val}: percentage-style stat over 100")
+        if typ == "max-mp" and fv > 100:
+            warn.append(f"max-mp {val}: option value over 100 (check flat-vs-percent/background bleed)")
+        if typ == "defense" and 0 < fv < 100:
+            warn.append(f"defense {val}: unusually small defense option")
+        if typ in ("accuracy", "evasion") and fv > 100:
+            warn.append(f"{typ} {val}: unusually large whole-number option")
+
+    # Duplicate option types may be legal in future/game variants, so warning only.
+    types = [str(st.get("type", "")) for st in stats]
+    dup_types = sorted({t for t in types if t and types.count(t) > 1})
+    if dup_types:
+        warn.append("duplicate option stat type(s): " + ", ".join(dup_types))
+
+    # Zero options may be valid for lower-tier gear; warning only.
+    if len(stats) == 0:
+        warn.append("no option stats parsed")
+
+    # Never throw away otherwise valid equipment just because lock colour is ambiguous.
+    if lock_status == "unclear":
+        warn.append("lock status unclear")
+
+    return hard, warn
+
 
 def parse_item_from_rows(filename: str, rows: List[OCRRow], visual_anchor: Optional[Dict[str, Any]] = None, visual_debug: Optional[List[str]] = None) -> Tuple[Optional[ParsedItem], str]:
     full_text = "\n".join(r.text for r in rows)
@@ -1334,7 +1827,7 @@ def _result_total(items_by_slot: Dict[str, List[Dict[str, Any]]], result: Dict[s
 def build_arena(items_by_slot: Dict[str, List[Dict[str, Any]]], base: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
     """Build the Main Evasion Arena/Colosseum preset.
 
-    v180 keeps the v165 main+sub total Evasion/Accuracy fix, but adds account
+    v187 keeps the v165 main+sub total Evasion/Accuracy fix, but adds account
     practical Accuracy protection.  The previous v165 shoulder swap gained only
     +12 Evasion while dropping -17 Accuracy, which pushed the estimated Arena
     stat screen under the user's ~400 Accuracy target.
@@ -1614,7 +2107,7 @@ def build_mp(items_by_slot: Dict[str, List[Dict[str, Any]]], base: Optional[Dict
 def fill_missing_slots_with_best_available(preset: Dict[str, int], items_by_slot: Dict[str, List[Dict[str, Any]]]) -> Dict[str, int]:
     """Fill empty slots with the strongest available item when no target stat exists.
 
-    v180 clears stale optimiser preset refs. For HP/MP, if a slot has no HP/MP
+    v187 clears stale optimiser preset refs. For HP/MP, if a slot has no HP/MP
     candidate at all, we still choose a fresh OCR item rather than preserving an
     old deleted optimiser item or leaving a stale reference. This keeps managed
     presets complete while target-stat slots remain selected by the pure HP/MP
@@ -1839,8 +2332,9 @@ def load_easyocr_reader():
 
 
 def ocr_image(reader: Any, path: Path) -> List[OCRRow]:
+    img = cv2.imread(str(path)) if cv2 is not None else None
     results = reader.readtext(str(path), detail=1, paragraph=False)
-    toks = tokens_from_easyocr(results)
+    toks = tokens_from_easyocr(results, image=img)
     rows = dedupe_rows(group_rows(toks))
     return rows
 
@@ -1883,7 +2377,7 @@ def _ensure_preset(names: List[Any], presets: List[Dict[str, Any]], stats: List[
 PERCENT_SUBSTAT_TYPES_FOR_OPTIMIZER_RAW = {
     "crit-rate", "crit-damage", "attack-speed", "normal-damage", "boss-damage",
     "damage", "final-damage", "min-damage-ratio", "max-damage-ratio",
-    "main-stat-percent", "basic-attack-damage", "skill-damage",
+    "main-stat-percent", "basic-attack-damage", "skill-damage", "defense-penetration",
 }
 
 
@@ -1897,7 +2391,7 @@ def _slot_percent_multiplier(starforce_by_slot: Dict[str, Any], slot: str) -> fl
     written as about 10.8 raw so optimiser displays 11.5 instead of 12.2.
 
     Main integer values such as Attack/HP/Main Stat/Defense are intentionally
-    NOT changed in v180.
+    NOT changed in v187.
     """
     try:
         sf = int(starforce_by_slot.get(slot, 0) or 0)
@@ -1956,7 +2450,7 @@ def apply_optimizer_percent_raw_fix(parsed: List[ParsedItem], old_data: Dict[str
 def _ensure_basic_preset(names: List[Any], presets: List[Dict[str, Any]], stats: List[Dict[str, Any]]) -> int:
     """Ensure a Basic Preset name exists, but do not auto-build Basic.
 
-    v180 treats fresh OCR inventory as the source of truth. Basic is kept as a
+    v187 treats fresh OCR inventory as the source of truth. Basic is kept as a
     named placeholder so the optimiser UI stays organised, but the user should
     rebuild it inside the optimiser after import.
     """
@@ -1978,7 +2472,7 @@ def _ensure_basic_preset(names: List[Any], presets: List[Dict[str, Any]], stats:
 def _item_to_equipment_base_stats(item: Dict[str, Any], slot: str) -> Dict[str, Any]:
     """Build optimiser equipmentBaseStats for an equipped OCR item.
 
-    v180 writes Basic from screenshots\Equipped in two places:
+    v187 writes Basic from screenshots\\Equipped in two places:
     1) equipmentPresets[Basic Preset]
     2) equippedItemsBySlot / equipmentBaseStats
 
@@ -2019,7 +2513,7 @@ def _validate_basic_equipped_written(data: Dict[str, Any], expected_slots: int) 
 def make_output_data(old_data: Dict[str, Any], parsed: List[ParsedItem], equipped_basic_refs: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
     data = json.loads(json.dumps(old_data))  # deep copy non-equipment optimiser settings
 
-    # v180 workflow:
+    # v187 workflow:
     # - mapleexport.txt is used as a shell only: class, abilities, companions,
     #   artifacts, potentials, scrolls, and preset names are kept.
     # - Old optimiser equipment inventory is NOT trusted because it can contain
@@ -2044,7 +2538,7 @@ def make_output_data(old_data: Dict[str, Any], parsed: List[ParsedItem], equippe
     data["nextComparisonItemId"] = max([int(it.get("id", 0)) for it in flat] + [1000]) + 1
 
     # Clear stale optimiser equipment records by default.
-    # v180 will repopulate these from screenshots\Equipped below, because the
+    # v187 will repopulate these from screenshots\Equipped below, because the
     # optimiser can display/import Basic from equippedItemsBySlot/equipmentBaseStats,
     # not only equipmentPresets[Basic Preset].
     data["equippedItemsBySlot"] = {}
@@ -2064,13 +2558,13 @@ def make_output_data(old_data: Dict[str, Any], parsed: List[ParsedItem], equippe
 
     basic_idx = _ensure_basic_preset(names, new_presets, new_stats)
 
-    # v180: Basic Preset comes from screenshots placed in C:\MapleOCR\screenshots\\Equipped.
+    # v187: Basic Preset comes from screenshots placed in C:\MapleOCR\screenshots\\Equipped.
     # One equipped item per slot is expected; if a slot is missing, it is left blank rather than guessed.
     equipped_basic_refs = equipped_basic_refs or {}
     if equipped_basic_refs:
         new_presets[basic_idx] = {slot: int(item_id) for slot, item_id in equipped_basic_refs.items() if slot in SLOT_ORDER and item_id}
 
-    # v180: also repopulate the optimiser's current-equipped structures from
+    # v187: also repopulate the optimiser's current-equipped structures from
     # screenshots\Equipped. This is the fix for Basic importing blank even when
     # equipmentPresets[Basic Preset] had refs.
     equipped_items_by_slot: Dict[str, Dict[str, Any]] = {}
@@ -2112,7 +2606,7 @@ def make_output_data(old_data: Dict[str, Any], parsed: List[ParsedItem], equippe
     data["equipmentPresetStats"] = new_stats
     data["currentEquipmentPreset"] = old_data.get("currentEquipmentPreset", 0)
 
-    # v180: normalise fresh equipment display names from actual attack fields.
+    # v187: normalise fresh equipment display names from actual attack fields.
     name_fix_report: List[str] = []
     normalize_equipment_display_names(data.get("comparisonItems"), name_fix_report, "comparisonItems")
     normalize_equipment_display_names(data.get("comparisonItemsBySlot"), name_fix_report, "comparisonItemsBySlot")
@@ -2172,7 +2666,7 @@ def build_arena_colosseum_report(data: Dict[str, Any], run_id: str) -> str:
         "ARENA / COLOSSEUM EQUIPMENT LIST",
         "",
         "Rule: Evasion first, protect Accuracy second, Arena-relevant damage third.",
-        "v180 fix: Evasion and Accuracy are totalled as main stat + sub-option, then selected equipment Accuracy is protected.",
+        "v187 fix: Evasion and Accuracy are totalled as main stat + sub-option, then selected equipment Accuracy is protected.",
         "Colosseum uses the same equipment logic as Arena.",
         "",
     ]
@@ -2218,7 +2712,7 @@ def build_arena_colosseum_report(data: Dict[str, Any], run_id: str) -> str:
 
 
 def build_pve_equipment_report(data: Dict[str, Any], run_id: str) -> str:
-    """Report the managed PvE seed presets v180 builds."""
+    """Report the managed PvE seed presets v187 builds."""
     names = data.get("equipmentPresetNames") or []
     presets = data.get("equipmentPresets") or []
     lines = [
@@ -2364,7 +2858,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     clear_output_folder(output_dir, screenshots_dir, maple2_path)
     write_text(output_dir / "RUN_ID.txt", f"Generated by MapleOCR {VERSION}\nRUN_ID: {run_id}\nOutput folder: {output_dir}\nScreenshots folder: {screenshots_dir}\nEquipped folder: {equipped_dir}\n")
 
-    # v180 scans two sources:
+    # v187 scans two sources:
     # - top-level C:\MapleOCR\screenshots files = bag inventory
     # - C:\MapleOCR\screenshots\\Equipped files = currently worn equipment for Basic Preset
     # Subfolders other than Equipped are ignored by design.
@@ -2399,7 +2893,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     reader = load_easyocr_reader()
     parsed: List[ParsedItem] = []
     reviews: List[Tuple[Path, str]] = []
-    debug_lines: List[str] = [f"Generated by MapleOCR {VERSION}", f"RUN_ID: {run_id}", f"Bag screenshots: {len(bag_imgs)}", f"Equipped screenshots: {len(equipped_imgs)}", f"Total screenshots: {len(imgs)}", "Anchor policy: v180 uses mapleexport.txt for non-equipment optimiser settings and preset names only; old optimiser equipment inventory is not trusted; fresh OCR comparisonItems/comparisonItemsBySlot are the source of truth; bag screenshots plus Equipped screenshots are imported; Equipped items are written into Basic Preset; Arena/Colosseum/HP/MP/Chapter Boss are rebuilt; all other equipment presets are kept by name but cleared for manual rebuild; lock status is captured from red padlocks into maplelocked.txt/lock_status.txt; Arena totals main+sub Evasion/Accuracy and protects selected equipment Accuracy; HP/MP are pure potion-upgrade stat sets; Max MP percent rows are parsed; equipment display names are normalised from attack fields; no attack/stat/percentage scaling is applied.", ""]
+    debug_lines: List[str] = [f"Generated by MapleOCR {VERSION}", f"RUN_ID: {run_id}", f"Bag screenshots: {len(bag_imgs)}", f"Equipped screenshots: {len(equipped_imgs)}", f"Total screenshots: {len(imgs)}", "Anchor policy: v187 uses mapleexport.txt for non-equipment optimiser settings and preset names only; old optimiser equipment inventory is not trusted; fresh OCR comparisonItems/comparisonItemsBySlot are the source of truth; bag screenshots plus Equipped screenshots are imported; Equipped items are written into Basic Preset; Arena/Colosseum/HP/MP/Chapter Boss are rebuilt; all other equipment presets are kept by name but cleared for manual rebuild; lock status is captured from the fixed lock-button ROI into maplelocked.txt/lock_status.txt; Arena totals main+sub Evasion/Accuracy and protects selected equipment Accuracy; HP/MP are pure potion-upgrade stat sets; Max MP percent rows are parsed; Defense Penetration is explicitly distinguished from Defense; substat values treat WHITE as the item value and GREEN as comparison-only fallback; large whole-number rows reject leading OCR fragments using repeated complete-value reconstruction before normal WHITE-first selection; skill-level rows retain duplicate/right-most foreground handling; conservative stat min/max validation rejects impossible OCR values and warns on suspicious ones; conservative sanity checks reject structural corruption and only warn on generous value thresholds/white-support gaps; zero rounding is permitted anywhere in trusted parser cleanup; equipment display names are normalised from attack fields; no attack/stat/percentage scaling is applied.", ""]
     if args.expected_count is not None and len(imgs) != args.expected_count:
         debug_lines.append(f"WARNING: expected {args.expected_count} total screenshots but found {len(imgs)}")
         debug_lines.append("")
@@ -2416,13 +2910,29 @@ def main(argv: Optional[List[str]] = None) -> int:
             debug_lines.extend(visual_debug)
             debug_lines.append("RAW/CLEANED ROWS:")
             for r in rows:
-                debug_lines.append(f"{r.idx:02d}: y={r.y:.1f} text={r.text}")
+                token_dbg = " ; ".join(
+                    f"{t.text}[fg={t.fg_class}:{t.fg_ratio:.2f},x={t.cx:.1f}]"
+                    for t in r.tokens
+                )
+                debug_lines.append(f"{r.idx:02d}: y={r.y:.1f} text={r.text} || TOKENS: {token_dbg}")
             if p:
                 p.lock_status = lock_status
                 p.source = img_source
                 debug_lines.extend(p.rows_debug)
-                parsed.append(p)
-                review_rows.append([img.name, img_source, p.slot, p.name, p.tier, p.level, str(p.attack), json.dumps(p.item.get("stats",[])), "; ".join(p.warnings + [f"lock={lock_status}"]), " | ".join(r.text for r in rows)])
+
+                sanity_hard, sanity_warn = sanity_check_parsed_item(p, rows, lock_status)
+                for w in sanity_warn:
+                    p.warnings.append("SANITY WARNING: " + w)
+                    debug_lines.append("SANITY WARNING: " + w)
+
+                if sanity_hard:
+                    sanity_reason = "SANITY REJECT: " + "; ".join(sanity_hard)
+                    debug_lines.append(sanity_reason)
+                    reviews.append((img, sanity_reason))
+                    review_rows.append([img.name, img_source, p.slot, p.name, p.tier, p.level, str(p.attack), json.dumps(p.item.get("stats",[])), "; ".join(p.warnings + [sanity_reason, f"lock={lock_status}"]), " | ".join(r.text for r in rows)])
+                else:
+                    parsed.append(p)
+                    review_rows.append([img.name, img_source, p.slot, p.name, p.tier, p.level, str(p.attack), json.dumps(p.item.get("stats",[])), "; ".join(p.warnings + [f"lock={lock_status}"]), " | ".join(r.text for r in rows)])
             else:
                 debug_lines.append(f"REVIEW: {reason}")
                 reviews.append((img, reason))
@@ -2545,7 +3055,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 write_text(output_dir / f"fresh_inventory_sanity_{VERSION}.txt", f"Generated by MapleOCR {VERSION}\nRUN_ID: {run_id}\nCould not write sanity report: {e}\n")
             except Exception:
                 pass
-        # v180: always write lock snapshots into Output, including dry-run.
+        # v187: always write lock snapshots into Output, including dry-run.
         # The real run also copies the plain files beside mapleupload.txt.
         maplelocked_text = build_lock_snapshot_text(parsed, run_id, len(bag_imgs), len(equipped_imgs), locked_only=True)
         lock_status_text = build_lock_snapshot_text(parsed, run_id, len(bag_imgs), len(equipped_imgs), locked_only=False)
