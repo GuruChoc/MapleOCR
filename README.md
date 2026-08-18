@@ -1,4 +1,4 @@
-﻿# MapleOCR
+# MapleOCR
 
 Windows helper workflow for MapleStory: Idle RPG equipment OCR.
 
@@ -27,6 +27,18 @@ v191 includes:
 - reusable popup-based MapleOCR directory cleaner
 
 Personal screenshots, optimiser exports, OCR results and generated ZIPs should not be committed.
+
+## Optimizer
+
+MapleOCR is designed to work with the MapleStory Idle RPG Optimizer:
+
+https://mirpg-optimizer.netlify.app/
+
+After a successful OCR run, import:
+
+```text
+C:\MapleOCR\mapleupload.txt
+```
 
 ## Run
 
