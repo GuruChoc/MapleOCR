@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-MapleOCR v191 - clean Results output directory + v189 OCR fixes.
+MapleOCR v193 - clean Results output directory + v189 OCR fixes.
 
 Uses mapleexport.txt only for optimiser non-equipment settings and preset names.
 Old optimiser equipment inventory/items are not trusted. comparisonItems and
@@ -8,7 +8,7 @@ comparisonItemsBySlot are replaced with fresh OCR items only. Arena, Colosseum,
 HP, MP and Chapter Boss are rebuilt from OCR items. Breakthrough and other equipment presets are kept by name
 but cleared for manual optimiser rebuild.
 
-v191 change: keeps the validated v190 OCR, validation, capture-order and Results-directory behaviour. Detailed generated files remain in C:\MapleOCR\Results. The real-run mapleupload.txt compatibility copy stays in C:\MapleOCR, check/result ZIPs are created in C:\MapleOCR, and every OCR run also creates C:\MapleOCR\BIS_stats.zip containing mapleexport.txt, lock_status.txt, maplelocked.txt and the matching import_review_easyocr_v191.csv from that same run.
+v193 change: keeps the validated v192 OCR/capture-order/ZIP/BIS workflow and removes the remaining late-game heuristic that marked low main Attack values as suspicious. Main item Attack is now validated structurally only: positive whole-number requirement, parser/main-value consistency, white/comparison colour handling, and split-fragment reconstruction remain active. Legitimate low-level gear is no longer rejected because of its absolute Attack value.
 
 Core rules:
 - Treat MapleStory Idle RPG equipment screenshots as fixed UI cards, not free-form text.
@@ -46,7 +46,7 @@ except Exception:  # setup_venv.ps1 / requirements.txt installs these
     cv2 = None
     np = None
 
-VERSION = "v191"
+VERSION = "v193"
 
 SLOT_ORDER = [
     "hat", "top", "bottom", "gloves", "ring", "ring2", "eye", "earring",
@@ -460,7 +460,7 @@ def _numbers_from_parts(parts: List[str], label: str) -> List[float]:
                 except Exception:
                     pass
 
-            # v191: EasyOCR can split a thousands-formatted value across
+            # v193: EasyOCR can split a thousands-formatted value across
             # two fragments as e.g. ``Attack | 20, | ,826``.  The previous
             # joiner handled ``20, | 826`` but not the second fragment keeping
             # the leading comma.  Join these only for non-percent integer main
@@ -476,7 +476,7 @@ def _numbers_from_parts(parts: List[str], label: str) -> List[float]:
                 except Exception:
                     pass
 
-            # v191: More split-number tolerance for equipped/bag popups.
+            # v193: More split-number tolerance for equipped/bag popups.
             # EasyOCR sometimes keeps the comparison delta in the right fragment
             # or inserts a letter where a comma/space should be, e.g.:
             #   Max HP | 103, | 725 -13,023  -> 103725
@@ -496,7 +496,7 @@ def _numbers_from_parts(parts: List[str], label: str) -> List[float]:
                 except Exception:
                     pass
 
-            # v191: when a comparison delta follows immediately after the
+            # v193: when a comparison delta follows immediately after the
             # right-side thousands fragment, norm_text+space stripping can
             # collapse e.g. ``040 ~2,430`` into ``0402,430``. In that case
             # the first three digits are still the right side of the main
@@ -1513,7 +1513,8 @@ SANITY_WHOLE_TYPES = {
 SANITY_KNOWN_STAT_TYPES = set(SUBSTAT_LABELS.values())
 
 
-# Conservative OCR validation ranges.
+# Conservative OCR validation ranges for OPTION/SUBSTAT values.
+# Main item Attack is intentionally excluded from fixed gameplay ranges in v192.
 # Format: label -> {hard_min, hard_max, warn_min, warn_max}
 # HARD = send to review if outside this range.
 # WARN = keep item, but flag it as suspicious if outside this narrower range.
@@ -1546,7 +1547,7 @@ STAT_VALIDATION_RANGES: Dict[str, Dict[str, float]] = {
 }
 
 SKILL_LEVEL_RANGE = {"hard_min": 1.0, "hard_max": 50.0, "warn_min": 1.0, "warn_max": 30.0}
-ITEM_ATTACK_RANGE = {"hard_min": 1000.0, "hard_max": 100000.0, "warn_min": 5000.0, "warn_max": 40000.0}
+ITEM_ATTACK_RANGE = {}  # v193: no fixed gameplay-value range for main item Attack
 
 
 def _stat_validation_range(label: str) -> Dict[str, float]:
@@ -1589,7 +1590,7 @@ def sanity_check_parsed_item(p: ParsedItem, rows: List[OCRRow], lock_status: str
     """Return (hard_errors, soft_warnings).
 
     HARD errors are structural/data-integrity failures only.
-    SOFT warnings are suspicious but may be valid on another account/tier. Stat ranges use generous warning bands and wider hard-reject bands.
+    SOFT warnings are suspicious but may be valid on another account/tier. Option-stat ranges use generous warning bands and wider hard-reject bands. Main item Attack has no fixed gameplay-value range.
     No sanity rule ever changes or rounds a value.
     """
     hard: List[str] = []
@@ -1603,17 +1604,21 @@ def sanity_check_parsed_item(p: ParsedItem, rows: List[OCRRow], lock_status: str
         if int(p.attack) != int(attack):
             hard.append(f"parsed attack/item attack mismatch: {p.attack!r} vs {attack!r}")
 
+        # v193: DO NOT sanity-reject main item Attack by a fixed numeric
+        # min/max. Valid gear spans a very wide range across player progress,
+        # item tier and item level. A fixed late-game floor caused legitimate
+        # low-level items to be rejected.
+        #
+        # Main Attack is instead protected structurally:
+        # - it must be a positive whole number (checked above)
+        # - parser/main-item attack must agree (checked above)
+        # - split white Attack fragments are reconstructed before selection
+        # - comparison/background colour filtering remains active
+        #
+        # Future item-aware validation may add level/tier-specific upper bounds,
+        # but v192 deliberately does not guess those bounds.
         item_attack = float(attack)
-        if item_attack < ITEM_ATTACK_RANGE["hard_min"] or item_attack > ITEM_ATTACK_RANGE["hard_max"]:
-            hard.append(
-                f"item attack {attack} outside hard range "
-                f"{int(ITEM_ATTACK_RANGE['hard_min'])}-{int(ITEM_ATTACK_RANGE['hard_max'])}"
-            )
-        elif item_attack < ITEM_ATTACK_RANGE["warn_min"] or item_attack > ITEM_ATTACK_RANGE["warn_max"]:
-            warn.append(
-                f"item attack {attack} outside warning range "
-                f"{int(ITEM_ATTACK_RANGE['warn_min'])}-{int(ITEM_ATTACK_RANGE['warn_max'])}"
-            )
+        # v193: absolute main Attack value is not used as a trust/review criterion.
     except Exception:
         hard.append("attack internal consistency check failed")
 
@@ -2780,13 +2785,13 @@ def make_output_data(old_data: Dict[str, Any], parsed: List[ParsedItem], equippe
 
     basic_idx = _ensure_basic_preset(names, new_presets, new_stats)
 
-    # v191: Basic Preset comes from screenshots placed in C:\MapleOCR\screenshots\\Equipped.
+    # v193: Basic Preset comes from screenshots placed in C:\MapleOCR\screenshots\\Equipped.
     # One equipped item per slot is expected; if a slot is missing, it is left blank rather than guessed.
     equipped_basic_refs = equipped_basic_refs or {}
     if equipped_basic_refs:
         new_presets[basic_idx] = {slot: int(item_id) for slot, item_id in equipped_basic_refs.items() if slot in SLOT_ORDER and item_id}
 
-    # v191: also repopulate the optimiser's current-equipped structures from
+    # v193: also repopulate the optimiser's current-equipped structures from
     # screenshots\Equipped. This is the fix for Basic importing blank even when
     # equipmentPresets[Basic Preset] had refs.
     equipped_items_by_slot: Dict[str, Dict[str, Any]] = {}
@@ -2828,7 +2833,7 @@ def make_output_data(old_data: Dict[str, Any], parsed: List[ParsedItem], equippe
     data["equipmentPresetStats"] = new_stats
     data["currentEquipmentPreset"] = old_data.get("currentEquipmentPreset", 0)
 
-    # v191: normalise fresh equipment display names from actual attack fields.
+    # v193: normalise fresh equipment display names from actual attack fields.
     name_fix_report: List[str] = []
     normalize_equipment_display_names(data.get("comparisonItems"), name_fix_report, "comparisonItems")
     normalize_equipment_display_names(data.get("comparisonItemsBySlot"), name_fix_report, "comparisonItemsBySlot")
@@ -3048,10 +3053,6 @@ def suspicious_attack_reason(slot: str, tier: str, level: str, attack: int) -> O
     except Exception:
         lvl = None
     tier_s = str(tier or "").strip().upper()
-    if lvl is not None and lvl >= 80 and attack < 9000:
-        return f"suspiciously low main Attack {attack} for Lv{lvl} {tier_s or 'unknown tier'} {slot}; likely OCR/comparison bleed"
-    if tier_s in ("T3", "T4") and attack < 9000:
-        return f"suspiciously low main Attack {attack} for {tier_s} {slot}; likely OCR/comparison bleed"
     return None
 
 
@@ -3075,7 +3076,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     old_data = json.loads(maple2_path.read_text(encoding="utf-8"))
 
-    # v191: clear Results at the start of every run. This prevents stale files
+    # v193: clear Results at the start of every run. This prevents stale files
     # from previous v149/v150/v151 runs contaminating zipped checks.
     clear_output_folder(output_dir, screenshots_dir, maple2_path)
     write_text(output_dir / "RUN_ID.txt", f"Generated by MapleOCR {VERSION}\nRUN_ID: {run_id}\nOutput folder: {output_dir}\nScreenshots folder: {screenshots_dir}\nEquipped folder: {equipped_dir}\n")
@@ -3090,7 +3091,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     imgs = [p for p, _src in img_sources]
     equipped_filenames = {p.name for p in equipped_imgs}
 
-    # v191: Preserve filesystem capture timestamps/order as audit metadata.
+    # v193: Preserve filesystem capture timestamps/order as audit metadata.
     # IMPORTANT: OCR processing order remains unchanged from v187 so ID assignment
     # and parser behaviour are not silently changed by this feature.
     capture_meta, batch_capture_sorted = build_capture_order(bag_imgs, equipped_imgs)
@@ -3163,12 +3164,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     reader = load_easyocr_reader()
     parsed: List[ParsedItem] = []
     reviews: List[Tuple[Path, str]] = []
-    debug_lines: List[str] = [f"Generated by MapleOCR {VERSION}", f"RUN_ID: {run_id}", f"Bag screenshots: {len(bag_imgs)}", f"Equipped screenshots: {len(equipped_imgs)}", f"Total screenshots: {len(imgs)}", "Anchor policy: v191 uses mapleexport.txt for non-equipment optimiser settings and preset names only; old optimiser equipment inventory is not trusted; fresh OCR comparisonItems/comparisonItemsBySlot are the source of truth; bag screenshots plus Equipped screenshots are imported; Equipped items are written into Basic Preset; Arena/Colosseum/HP/MP/Chapter Boss are rebuilt; all other equipment presets are kept by name but cleared for manual rebuild; lock status is captured from the fixed lock-button ROI into maplelocked.txt/lock_status.txt; Arena totals main+sub Evasion/Accuracy and protects selected equipment Accuracy; HP/MP are pure potion-upgrade stat sets; Max MP percent rows are parsed; Defense Penetration is explicitly distinguished from Defense; substat values treat WHITE as the item value and GREEN as comparison-only fallback; large whole-number rows reject leading OCR fragments using repeated complete-value reconstruction before normal WHITE-first selection; skill-level rows retain duplicate/right-most foreground handling; conservative stat min/max validation rejects impossible OCR values and warns on suspicious ones; conservative sanity checks reject structural corruption and only warn on generous value thresholds/white-support gaps; zero rounding is permitted anywhere in trusted parser cleanup; equipment display names are normalised from attack fields; no attack/stat/percentage scaling is applied.", ""]
+    debug_lines: List[str] = [f"Generated by MapleOCR {VERSION}", f"RUN_ID: {run_id}", f"Bag screenshots: {len(bag_imgs)}", f"Equipped screenshots: {len(equipped_imgs)}", f"Total screenshots: {len(imgs)}", "Anchor policy: v193 uses mapleexport.txt for non-equipment optimiser settings and preset names only; old optimiser equipment inventory is not trusted; fresh OCR comparisonItems/comparisonItemsBySlot are the source of truth; bag screenshots plus Equipped screenshots are imported; Equipped items are written into Basic Preset; Arena/Colosseum/HP/MP/Chapter Boss are rebuilt; all other equipment presets are kept by name but cleared for manual rebuild; lock status is captured from the fixed lock-button ROI into maplelocked.txt/lock_status.txt; Arena totals main+sub Evasion/Accuracy and protects selected equipment Accuracy; HP/MP are pure potion-upgrade stat sets; Max MP percent rows are parsed; Defense Penetration is explicitly distinguished from Defense; substat values treat WHITE as the item value and GREEN as comparison-only fallback; large whole-number rows reject leading OCR fragments using repeated complete-value reconstruction before normal WHITE-first selection; skill-level rows retain duplicate/right-most foreground handling; conservative option-stat min/max validation rejects impossible OCR values and warns on suspicious ones; main item Attack is not constrained by fixed gameplay-value ranges; conservative sanity checks reject structural corruption and only warn on generous option-stat thresholds/white-support gaps; zero rounding is permitted anywhere in trusted parser cleanup; equipment display names are normalised from attack fields; no attack/stat/percentage scaling is applied.", ""]
     if args.expected_count is not None and len(imgs) != args.expected_count:
         debug_lines.append(f"WARNING: expected {args.expected_count} total screenshots but found {len(imgs)}")
         debug_lines.append("")
     review_rows: List[List[str]] = [[
-        "filename","source","source_capture_order","batch_capture_order","capture_timestamp",
+        "run_id","filename","source","source_capture_order","batch_capture_order","capture_timestamp",
         "file_created_timestamp","file_modified_timestamp",
         "slot","shorthand_name","tier","level","attack","option_stats","warnings","ocr_rows"
     ]]
@@ -3211,7 +3212,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     debug_lines.append(sanity_reason)
                     reviews.append((img, sanity_reason))
                     review_rows.append([
-                        img.name, img_source,
+                        run_id, img.name, img_source,
                         meta["source_capture_order"], meta["batch_capture_order"], meta["capture_timestamp"],
                         meta["created_timestamp"], meta["modified_timestamp"],
                         p.slot, p.name, p.tier, p.level, str(p.attack),
@@ -3222,7 +3223,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 else:
                     parsed.append(p)
                     review_rows.append([
-                        img.name, img_source,
+                        run_id, img.name, img_source,
                         meta["source_capture_order"], meta["batch_capture_order"], meta["capture_timestamp"],
                         meta["created_timestamp"], meta["modified_timestamp"],
                         p.slot, p.name, p.tier, p.level, str(p.attack),
@@ -3234,7 +3235,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 debug_lines.append(f"REVIEW: {reason}")
                 reviews.append((img, reason))
                 review_rows.append([
-                    img.name, img_source,
+                    run_id, img.name, img_source,
                         meta["source_capture_order"], meta["batch_capture_order"], meta["capture_timestamp"],
                         meta["created_timestamp"], meta["modified_timestamp"],
                     "", "", "", "", "", "", reason, " | ".join(r.text for r in rows)
@@ -3248,7 +3249,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"| capture_timestamp={meta['capture_timestamp']}\nEXCEPTION: {e}"
             )
             review_rows.append([
-                img.name, img_source,
+                run_id, img.name, img_source,
                 meta["source_capture_order"], meta["batch_capture_order"], meta["capture_timestamp"],
                 meta["created_timestamp"], meta["modified_timestamp"],
                 "", "", "", "", "", "", f"exception: {e}", ""
@@ -3379,7 +3380,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 write_text(output_dir / f"fresh_inventory_sanity_{VERSION}.txt", f"Generated by MapleOCR {VERSION}\nRUN_ID: {run_id}\nCould not write sanity report: {e}\n")
             except Exception:
                 pass
-        # v191: always write lock snapshots into Output, including dry-run.
+        # v193: always write lock snapshots into Output, including dry-run.
         # The real run also copies the plain files beside mapleupload.txt.
         maplelocked_text = build_lock_snapshot_text(parsed, run_id, len(bag_imgs), len(equipped_imgs), locked_only=True)
         lock_status_text = build_lock_snapshot_text(parsed, run_id, len(bag_imgs), len(equipped_imgs), locked_only=False)
@@ -3480,41 +3481,77 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         write_text(output_dir / "delete_from_opti.txt", f"Generated by MapleOCR {VERSION}\nFresh OCR inventory is the source of truth. Top-level screenshots are bag inventory; screenshots\\Equipped is the currently worn Basic Preset source. Arena/Colosseum/HP/MP/Chapter Boss managed presets are rebuilt from OCR items where present. Breakthrough is intentionally left for the optimiser to rebuild. Other manual optimiser presets are kept by name but cleared/rebuild-needed to avoid stale deleted item references.\n")
 
-    # v191: Create a single BIS handoff ZIP from this exact OCR run.
-    # This deliberately uses the current mapleexport input plus the lock/review
-    # files just generated in Results, so a future BIS report cannot accidentally
-    # mix files from different OCR batches.
-    bis_zip = base_dir / "BIS_stats.zip"
-    bis_members = [
-        (maple2_path, "mapleexport.txt"),
-        (output_dir / "lock_status.txt", "lock_status.txt"),
-        (output_dir / "maplelocked.txt", "maplelocked.txt"),
-        (output_dir / f"import_review_easyocr_{VERSION}.csv", f"import_review_easyocr_{VERSION}.csv"),
-    ]
+    # v193: A fresh OCR scan makes any previous BIS_stats.zip potentially stale.
+    # Do NOT package mapleexport.txt here: the optimiser has not yet imported this
+    # run's mapleupload.txt, so the root mapleexport.txt may describe the previous
+    # inventory state.
+    if not args.dry_run:
+        stale_bis_zip = base_dir / "BIS_stats.zip"
+        try:
+            if stale_bis_zip.exists():
+                stale_bis_zip.unlink()
+        except Exception as e:
+            write_text(
+                output_dir / f"BIS_stats_STALE_REMOVE_FAILED_{VERSION}.txt",
+                f"Generated by MapleOCR {VERSION}\nRUN_ID: {run_id}\n"
+                f"Could not remove stale {stale_bis_zip}: {e}\n"
+            )
+
+        pending_text = "\n".join([
+            f"Generated by MapleOCR {VERSION}",
+            f"RUN_ID: {run_id}",
+            "",
+            "BIS_stats.zip is intentionally PENDING.",
+            "",
+            "Required workflow:",
+            "1. Import C:\\MapleOCR\\mapleupload.txt into the optimiser.",
+            "2. Export the updated optimiser data back to C:\\MapleOCR\\mapleexport.txt.",
+            f"3. Run .\\build_BIS_stats_{VERSION}.ps1",
+            "",
+            "The BIS builder will refuse to create BIS_stats.zip unless the",
+            "equipment IDs in mapleexport.txt exactly match this OCR run's",
+            "lock_status.txt.",
+        ])
+        write_text(output_dir / f"BIS_stats_PENDING_{VERSION}.txt", pending_text)
+        try:
+            write_text(base_dir / f"BIS_stats_PENDING_{VERSION}.txt", pending_text)
+        except Exception:
+            pass
+
+    # v192 ZIP FIX: create the check ZIP inside the importer itself.
+    # This makes GUI dry runs reliable even if the GUI invokes a stale/copy wrapper.
+    check_zip = base_dir / f"Output_{VERSION}_check.zip"
     try:
-        missing_bis = [str(p) for p, _arc in bis_members if not p.exists()]
-        if missing_bis:
-            raise FileNotFoundError("Missing BIS source file(s): " + ", ".join(missing_bis))
-        temp_bis_zip = bis_zip.with_suffix(".zip.tmp")
-        if temp_bis_zip.exists():
-            temp_bis_zip.unlink()
-        with zipfile.ZipFile(temp_bis_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for source_path, archive_name in bis_members:
-                zf.write(source_path, arcname=archive_name)
-        os.replace(temp_bis_zip, bis_zip)
-        print(f"BIS handoff ZIP: {bis_zip}")
+        if check_zip.exists():
+            check_zip.unlink()
+
+        result_files = [p for p in output_dir.iterdir() if p.is_file()]
+        if not result_files:
+            raise RuntimeError(f"No result files found in {output_dir}")
+
+        temp_check_zip = base_dir / f"Output_{VERSION}_check.zip.tmp"
+        if temp_check_zip.exists():
+            temp_check_zip.unlink()
+
+        with zipfile.ZipFile(temp_check_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for p in sorted(result_files, key=lambda x: x.name.lower()):
+                zf.write(p, arcname=p.name)
+
+        temp_check_zip.replace(check_zip)
+        print(f"Check ZIP: {check_zip}")
     except Exception as e:
         try:
-            temp_bis_zip = bis_zip.with_suffix(".zip.tmp")
-            if temp_bis_zip.exists():
-                temp_bis_zip.unlink()
+            temp_check_zip = base_dir / f"Output_{VERSION}_check.zip.tmp"
+            if temp_check_zip.exists():
+                temp_check_zip.unlink()
         except Exception:
             pass
         write_text(
-            output_dir / f"BIS_stats_WRITE_FAILED_{VERSION}.txt",
-            f"Generated by MapleOCR {VERSION}\nRUN_ID: {run_id}\nCould not create {bis_zip}: {e}\n"
+            output_dir / f"CHECK_ZIP_WRITE_FAILED_{VERSION}.txt",
+            f"Generated by MapleOCR {VERSION}\nRUN_ID: {run_id}\n"
+            f"Could not create {check_zip}: {e}\n"
         )
-        print(f"WARNING: BIS_stats.zip was not created: {e}")
+        print(f"WARNING: check ZIP was not created: {e}")
 
     summary_text = build_final_summary(len(imgs), len(parsed), len(reviews), mapleupload_written)
     if args.dry_run:
