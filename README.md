@@ -1,151 +1,47 @@
 # MapleOCR
 
-Windows helper workflow for MapleStory: Idle RPG equipment Optical Character Recognition.
+MapleOCR turns MapleStory: Idle RPG equipment screenshots into structured equipment/inventory data for the optimiser and BIS report workflow.
 
-## Current baseline
+## v194 workflow
 
-**v193**
+1. Capture bag screenshots in `C:\MapleOCR\screenshots`.
+2. Capture currently equipped Basic Preset screenshots in `C:\MapleOCR\screenshots\Equipped`.
+3. Run MapleOCR v194.
+4. Import `C:\MapleOCR\mapleupload.txt` into the optimiser.
+5. Export fresh optimiser data to `C:\MapleOCR\mapleexport.txt`.
+6. Run `\.\build_BIS_stats_v194.ps1`.
+7. Upload `C:\MapleOCR\BIS_stats.zip` to the BIS report workflow.
 
-MapleOCR v193 includes:
+## v194 BIS report authority
 
-- Equipped screenshots rebuilding the Basic Preset
-- fresh bag inventory Optical Character Recognition
-- support for mixed progression levels without a fixed minimum main Attack value
-- white-first foreground stat reading
-- comparison and background bleed filtering
-- split and comma-formatted whole-number reconstruction
-- targeted main Attack fragment reconstruction
-- zero-rounding parser policy
-- Defense Penetration parsing
-- conservative option-stat and structural validation
-- lock-state snapshots from the same screenshot batch
-- screenshot capture timestamp and order tracking for Best in Slot LOCK and UNLOCK sorting
-- automatic Arena, Colosseum, Maximum Health, Maximum Mana and Chapter Boss preset rebuilding
-- generated detail files under `C:\MapleOCR\Results`
-- `mapleupload.txt` compatibility copy in `C:\MapleOCR`
-- automatic `Output_v193_check.zip` creation after a run
-- safe post-optimizer `BIS_stats.zip` builder
-- same-run Best in Slot validation using physical equipment data rather than optimizer item identifiers
-- handling for optimizer item identifier remapping and cached duplicate equipment rows
-- Basic Preset normalization when the optimizer export drifts from the current Equipped Optical Character Recognition snapshot
-- preservation of displaced real bag items during Basic Preset normalization
-- reusable popup-based MapleOCR directory cleaner
+v194 adds `Results\bis_report_authority_v194.csv`, generated from the same OCR RUN_ID.
 
-Personal screenshots, optimizer exports, Optical Character Recognition results and generated ZIP files should not be committed to the repository.
+This file is the authority for:
+- first-substat validation: use screenshot/OCR row order
+- LOCK/UNLOCK working order: use BAG `source_capture_order` ascending
 
-## Optimizer
+Do not infer first-substat order from optimiser export order or lock-status serialization.
 
-MapleOCR is designed to work with the MapleStory Idle RPG Optimizer:
+## Validated v194 test
 
-https://mirpg-optimizer.netlify.app/
-
-After a successful real MapleOCR run, import:
-
-```text
-C:\MapleOCR\mapleupload.txt
-```
-
-into the optimizer.
-
-After importing, export the updated optimizer data back to:
-
-```text
-C:\MapleOCR\mapleexport.txt
-```
-
-Then build the Best in Slot handoff ZIP with:
-
-```powershell
-cd C:\MapleOCR
-.\build_BIS_stats_v193.ps1
-```
-
-The builder creates:
-
-```text
-C:\MapleOCR\BIS_stats.zip
-```
-
-only after validating that the optimizer export is compatible with the current Optical Character Recognition run.
-
-## Optimizer
-
-MapleOCR is designed to work with the MapleStory Idle RPG Optimizer:
-
-https://mirpg-optimizer.netlify.app/
-
-After a successful OCR run, import:
-
-```text
-C:\MapleOCR\mapleupload.txt
-```
-
-## Run
-
-Dry run:
-
-```powershell
-cd C:\MapleOCR
-.\run_v193_full_inventory_dry_run.ps1
-```
-
-Real run:
-
-```powershell
-cd C:\MapleOCR
-.\run_v193_full_inventory.ps1
-```
-
-The real run writes detailed output to:
-
-```text
-C:\MapleOCR\Results
-```
-
-and keeps these convenience files in the MapleOCR root:
-
-```text
-C:\MapleOCR\mapleupload.txt
-C:\MapleOCR\Output_v193_check.zip
-```
-
-A previous `BIS_stats.zip` is removed after a new real Optical Character Recognition run because it may describe an older inventory state.
-
-After importing the new `mapleupload.txt` into the optimizer and exporting a fresh `mapleexport.txt`, run:
-
-```powershell
-cd C:\MapleOCR
-.\build_BIS_stats_v193.ps1
-```
-
-The resulting `BIS_stats.zip` contains the same-run Best in Slot source files, including:
-
-- `mapleexport.txt`
-- `lock_status.txt`
-- `maplelocked.txt`
-- `import_review_easyocr_v193.csv`
-- `screenshot_manifest_v193.txt`
-- `screenshot_capture_order_v193.csv`
-- `RUN_ID.txt`
-
-## Validation baseline
-
-The v193 release candidate was validated on a mixed-level inventory containing:
-
-- 305 bag equipment screenshots
+- 305 bag screenshots
 - 14 Equipped screenshots
-- 319 total screenshots
-- 319 trusted equipment rows
+- 319 trusted items
 - 0 review items
+- 319 BIS authority rows
+- BAG capture order 1–305 with no gaps/duplicates
+- first-substat authority 319/319 with 0 mismatches
+- final `BIS_stats.zip` successfully built after a fresh optimiser import/export
 
-The final Best in Slot builder was also validated on that run and successfully created `BIS_stats.zip`.
+## Main files
 
-## Directory cleanup
+- `maple_batch_importer_easyocr_v194.py`
+- `build_bis_stats_v194.py`
+- `build_BIS_stats_v194.ps1`
+- `run_v194_full_inventory.ps1`
+- `run_v194_full_inventory_dry_run.ps1`
+- `run_v194_full_inventory_and_zip.ps1`
+- `open_v194_results.ps1`
+- `MapleOCR_Directory_Cleaner.bat`
 
-Double-click:
-
-```text
-MapleOCR_Directory_Cleaner.bat
-```
-
-Enter the latest build number when prompted. Old versioned and helper files are moved into a timestamped folder under `backups`; they are not permanently deleted.
+Personal screenshots, exports, results, and generated ZIP files should not be committed to the repository.
