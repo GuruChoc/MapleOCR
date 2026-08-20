@@ -2,64 +2,69 @@
 
 MapleOCR turns MapleStory: Idle RPG equipment screenshots into structured equipment/inventory data for the optimiser and BIS report workflow.
 
-## v195 workflow
+## Current location
 
-1. Capture bag screenshots in `C:\MapleOCR\screenshots`.
-2. Capture currently equipped Basic Preset screenshots in `C:\MapleOCR\screenshots\Equipped`.
-3. Run MapleOCR v195.
-4. Import `C:\MapleOCR\mapleupload.txt` into the optimiser.
-5. Export fresh optimiser data to `C:\MapleOCR\mapleexport.txt`.
-6. Run `.\build_BIS_stats_v195.ps1`.
-7. Upload `C:\MapleOCR\BIS_stats.zip` to the BISMIRPG report workflow.
+`C:\MapleProjects\MapleOCR`
 
-## v195 OCR fix
+MapleOCR can be launched through the Maple Toolbox GUI or run directly from PowerShell.
 
-v195 fixes a confirmed main Attack split-fragment failure where a non-numeric/background OCR token could appear between the `Attack` label and the actual number fragments.
+## v196 workflow
 
-Confirmed example:
+1. Capture bag screenshots in `C:\MapleProjects\MapleOCR\screenshots`.
+2. Capture the 14 currently equipped Basic Preset items in `C:\MapleProjects\MapleOCR\screenshots\Equipped`.
+3. Run MapleOCR v196.
+4. Import `C:\MapleProjects\MapleOCR\mapleupload.txt` into the optimiser.
+5. Export fresh optimiser data to `C:\MapleProjects\MapleOCR\mapleexport.txt`.
+6. Run `.\build_BIS_stats_v196.ps1`.
+7. Use `C:\MapleProjects\MapleOCR\BIS_stats.zip` for the BIS report workflow.
 
-`Attack | Speler | 22,5 | 927 -180`
+## v196 Star Force sync
 
-v195 ignores the unrelated text token and reconstructs:
+v196 reads the Star Force badge from each Equipped screenshot and makes those screenshot values authoritative for `equipmentStarForceBySlot`.
+
+This prevents stale optimiser Star Force metadata from applying a second equipment boost after an in-game upgrade.
+
+The run creates:
+
+`Results\star_force_sync_v196.txt`
+
+showing the screenshot Star Force, previous optimiser Star Force and whether each slot was already correct or was updated.
+
+## v195 Attack reconstruction retained
+
+v196 retains the v195 fix for split Attack OCR such as:
 
 `22,5 + 927 -> 22,927`
 
-This is deliberately targeted. MapleOCR does **not** use a global minimum Attack rule, so legitimate lower-level equipment remains supported.
+without restoring a global minimum Attack rule.
 
 ## BIS report authority
 
-The v194 authority rules remain unchanged in v195.
+The v194/v195 authority rules remain in place:
 
-`Results\bis_report_authority_v195.csv` is generated from the same OCR RUN_ID and is the authority for:
+- first-substat validation uses screenshot/OCR row order
+- LOCK/UNLOCK working order uses BAG `source_capture_order` ascending
 
-- first-substat validation: screenshot/OCR row order
-- LOCK/UNLOCK working order: BAG `source_capture_order` ascending
+## Validated v196 release
 
-Do not infer first-substat order from optimiser export order or lock-status serialization.
-
-## Validated v195 release
-
-- 305 bag screenshots
+- 212 bag screenshots
 - 14 Equipped screenshots
-- 319 trusted items
+- 226 trusted items
 - 0 review items
-- 319 BIS authority rows
-- BAG capture order 1–305 with no gaps/duplicates
-- Equipped capture order 1–14
-- first-substat authority 319/319 with 0 mismatches
-- confirmed Hat Attack reconstruction: 22,927
+- all 14 Equipped Star Force values validated
+- Belt 26,785 / 7,973 / 11.5% / 12% survived the optimiser round-trip unchanged
 - final `BIS_stats.zip` successfully built and validated
-- BIS report confirmed working
+- BIS report workflow passed
 
 ## Main files
 
-- `maple_batch_importer_easyocr_v195.py`
-- `build_bis_stats_v195.py`
-- `build_BIS_stats_v195.ps1`
-- `run_v195_full_inventory.ps1`
-- `run_v195_full_inventory_dry_run.ps1`
-- `run_v195_full_inventory_and_zip.ps1`
-- `open_v195_results.ps1`
+- `maple_batch_importer_easyocr_v196.py`
+- `build_bis_stats_v196.py`
+- `build_BIS_stats_v196.ps1`
+- `run_v196_full_inventory.ps1`
+- `run_v196_full_inventory_dry_run.ps1`
+- `run_v196_full_inventory_and_zip.ps1`
+- `open_v196_results.ps1`
 - `MapleOCR_Directory_Cleaner.bat`
 
-Personal screenshots, exports, results, and generated ZIP files should not be committed to the repository.
+Personal screenshots, optimiser exports, results and generated ZIPs should not be committed.
